@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compile and test
+        env:
+          PYTHONPATH: src
+        run: |
+          python3 -m compileall -q src tests
+          python3 -m unittest discover -v
+      - name: Check shell scripts
+        run: |
+          bash -n install/install.sh
+          shellcheck install/install.sh
+      - name: Validate Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: Validate sudoers
+        run: sudo visudo -cf sudoers/deployctl

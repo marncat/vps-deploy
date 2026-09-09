@@ -1,0 +1,17 @@
+schema_version = 1
+
+[projects.example-app]
+services = ["example-app.service"]
+artifact_deploy = true
+keep_releases = 5
+health_url = "http://127.0.0.1:8080/healthz"
+health_timeout_seconds = 30
+max_archive_bytes = 1073741824
+max_extracted_bytes = 4294967296
+max_archive_members = 100000
+
+# Multi-service example. Keep artifact_deploy false until the project has been
+# migrated to the releases/current layout.
+# [projects.example-suite]
+# services = ["example-api.service", "example-worker.service"]
+# artifact_deploy = false

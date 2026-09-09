@@ -1,0 +1,130 @@
+name: Deploy artifact to VPS
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Server-side deployctl project name
+        required: true
+        type: string
+      artifact_name:
+        description: Artifact containing exactly one release.tar.gz
+        required: false
+        default: deployable
+        type: string
+    secrets:
+      vps_host:
+        required: true
+      vps_port:
+        required: true
+      vps_ssh_key:
+        required: true
+      vps_known_hosts:
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: vps-deploy-${{ inputs.project }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    env:
+      DEPLOY_PROJECT: ${{ inputs.project }}
+      VPS_HOST: ${{ secrets.vps_host }}
+      VPS_PORT: ${{ secrets.vps_port }}
+      VPS_SSH_KEY: ${{ secrets.vps_ssh_key }}
+      VPS_KNOWN_HOSTS: ${{ secrets.vps_known_hosts }}
+    steps:
+      - name: Validate deployment inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "$DEPLOY_PROJECT" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+            echo "::error::Invalid deployment project name."
+            exit 1
+          fi
+          for required_secret in VPS_HOST VPS_PORT VPS_SSH_KEY VPS_KNOWN_HOSTS; do
+            if [[ -z "${!required_secret}" ]]; then
+              echo "::error::$required_secret is empty or unavailable."
+              exit 1
+            fi
+          done
+          [[ "$VPS_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( 10#$VPS_PORT >= 1 && 10#$VPS_PORT <= 65535 ))
+          if [[ "$VPS_HOST" =~ [[:space:]@/] ]]; then
+            echo "::error::VPS_HOST must contain only a hostname or IP."
+            exit 1
+          fi
+
+      - name: Download deployable artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/deploy-artifact
+
+      - name: Validate artifact
+        id: artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          readonly artifact_dir="$RUNNER_TEMP/deploy-artifact"
+          mapfile -d '' files < <(find "$artifact_dir" -type f -print0)
+          if [[ ${#files[@]} -ne 1 || ${files[0]##*/} != release.tar.gz ]]; then
+            echo "::error::Artifact must contain exactly one file named release.tar.gz."
+            exit 1
+          fi
+          gzip -t -- "${files[0]}"
+          sha256sum -- "${files[0]}"
+          {
+            echo "path=${files[0]}"
+            echo "release_id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:12}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure restricted SSH client
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          install -d -m 0700 "$RUNNER_TEMP/deploy-ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$RUNNER_TEMP/deploy-ssh/id_ed25519"
+          chmod 0600 "$RUNNER_TEMP/deploy-ssh/id_ed25519"
+          ssh-keygen -y -f "$RUNNER_TEMP/deploy-ssh/id_ed25519" >/dev/null
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$RUNNER_TEMP/deploy-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/deploy-ssh/known_hosts"
+          if LC_ALL=C grep -q $'\r' "$RUNNER_TEMP/deploy-ssh/known_hosts"; then
+            echo "::error::VPS_KNOWN_HOSTS contains CRLF characters."
+            exit 1
+          fi
+          lookup_host="$VPS_HOST"
+          if [[ "$VPS_PORT" != 22 ]]; then
+            lookup_host="[$VPS_HOST]:$VPS_PORT"
+          fi
+          ssh-keygen -F "$lookup_host" -f "$RUNNER_TEMP/deploy-ssh/known_hosts" >/dev/null || {
+            echo "::error::VPS_KNOWN_HOSTS does not match VPS_HOST/VPS_PORT."
+            exit 1
+          }
+
+      - name: Stream and activate release
+        shell: bash
+        env:
+          ARCHIVE_PATH: ${{ steps.artifact.outputs.path }}
+          RELEASE_ID: ${{ steps.artifact.outputs.release_id }}
+        run: |
+          set -Eeuo pipefail
+          ssh \
+            -i "$RUNNER_TEMP/deploy-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/deploy-ssh/known_hosts" \
+            -p "$VPS_PORT" \
+            "deploy@$VPS_HOST" \
+            "deploy $DEPLOY_PROJECT $RELEASE_ID" < "$ARCHIVE_PATH"
