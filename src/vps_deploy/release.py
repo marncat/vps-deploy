@@ -291,10 +291,15 @@ def deploy_release(
     releases = project_root / "releases"
     if releases.is_symlink():
         raise ReleaseError(f"releases must not be a symlink: {releases}")
-    releases.mkdir(mode=0o2750, exist_ok=True)
-    if not releases.is_dir() or releases.stat().st_uid != os.geteuid():
+    if not releases.is_dir():
+        raise ReleaseError(f"releases must be a pre-created directory: {releases}")
+    releases_info = releases.stat()
+    if releases_info.st_uid != os.geteuid():
         raise ReleaseError(f"releases must be owned by the current user: {releases}")
-    os.chmod(releases, 0o2750)
+    if not releases_info.st_mode & stat.S_ISGID:
+        raise ReleaseError(f"releases must have the setgid bit: {releases}")
+    if not os.access(releases, os.W_OK | os.X_OK):
+        raise ReleaseError(f"releases must be writable by the current user: {releases}")
 
     lock = _acquire_lock(project_root / ".deploy.lock")
     archive: Path | None = None

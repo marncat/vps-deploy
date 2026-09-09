@@ -20,6 +20,10 @@ sudo install -d -o deploy -g PROJECT_RUNTIME_GROUP -m 2750 /srv/PROJECT
 sudo install -d -o deploy -g PROJECT_RUNTIME_GROUP -m 2750 /srv/PROJECT/releases
 ```
 
+`releases` must remain a pre-created setgid directory. `release-deploy` verifies
+this boundary but does not repair its mode: an unprivileged `deploy` process may
+not preserve setgid when the directory group is the separate runtime group.
+
 The runtime user only needs read/execute access. Persistent data belongs outside
 release directories, normally under `/var/lib/<project>` or an existing
 project-specific data directory. Secrets remain in `/etc/<project>`.

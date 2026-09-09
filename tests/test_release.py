@@ -44,6 +44,9 @@ class ReleaseTests(unittest.TestCase):
         root = Path(directory)
         project_root = root / "app"
         project_root.mkdir(mode=0o750)
+        releases = project_root / "releases"
+        releases.mkdir(mode=0o750)
+        os.chmod(releases, 0o2750)
         return root, project_root
 
     def test_success_preserves_executable_and_switches_relative_link(self):
@@ -58,8 +61,27 @@ class ReleaseTests(unittest.TestCase):
             release = project_root / "releases/1-1-aabbccddeeff"
             self.assertTrue((release / "app").stat().st_mode & 0o100)
             self.assertEqual(release.stat().st_mode & 0o777, 0o550)
+            self.assertEqual(release.stat().st_gid, (project_root / "releases").stat().st_gid)
+            self.assertEqual((release / "web/index.html").stat().st_gid, release.stat().st_gid)
             self.assertTrue((release / SUCCESS_MARKER).is_file())
             self.assertEqual(calls, [("restart", "app")])
+
+    def test_releases_directory_must_be_precreated_with_setgid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_root = root / "app"
+            project_root.mkdir(mode=0o750)
+            payload = archive_bytes({"app": (b"binary", 0o755)})
+
+            with self.assertRaisesRegex(ReleaseError, "pre-created directory"):
+                deploy_release(self.project(), "missing", io.BytesIO(payload), projects_root=root,
+                               activator=lambda *_args: self.fail("activation must not run"))
+
+            releases = project_root / "releases"
+            releases.mkdir(mode=0o750)
+            with self.assertRaisesRegex(ReleaseError, "setgid bit"):
+                deploy_release(self.project(), "no-setgid", io.BytesIO(payload), projects_root=root,
+                               activator=lambda *_args: self.fail("activation must not run"))
 
     def test_failed_activation_rolls_back_and_removes_failed_release(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,7 +137,6 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root, project_root = self.setup_root(directory)
             releases = project_root / "releases"
-            releases.mkdir()
             for index in range(3):
                 release = releases / f"old-{index}"
                 release.mkdir()
@@ -134,7 +155,6 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root, project_root = self.setup_root(directory)
             releases = project_root / "releases"
-            releases.mkdir()
             old_current = releases / "current-old"
             old_current.mkdir()
             (old_current / SUCCESS_MARKER).write_text("{}")
