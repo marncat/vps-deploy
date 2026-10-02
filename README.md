@@ -54,3 +54,21 @@ bash -n install/install.sh
 
 See [the project migration template](docs/migration-template.md) when adopting
 the protocol in an existing application.
+
+## Optional deployment storage policy
+
+Administrator configuration can set `max_release_bytes` (aggregate release-tree
+bytes), `min_free_bytes` (host reserve), and `prepare_services` (unique allowlisted
+oneshot units). Zero byte limits and an empty unit list preserve existing behavior.
+`journal_namespace` optionally selects the validated systemd journal namespace
+for failure diagnostics.
+
+Under the deployment lock, `release-deploy` atomically writes
+`.deploy-request.json` with `release_id` and a `phase` of `receive`, `activate`, or
+`cleanup`, then invokes `deployctl prepare`. The unit must treat that file as
+untrusted data. Receive and activate failures prevent changing current; cleanup
+failures are reported. Upload archives are removed before activation. Interrupted
+receiver/staging files and non-current pending releases are reclaimed on retry.
+A failed rollback creates `.deployment-needs-recovery`; an administrator must
+verify recovery before removing it and retrying. Release filesystem changes stay
+unprivileged; only registered service units run privileged policy checks.

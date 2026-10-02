@@ -240,6 +240,40 @@ def _write_archive(stream: BinaryIO, output: BinaryIO, maximum: int) -> str:
     return digest.hexdigest()
 
 
+def release_bytes(root: Path) -> int:
+    """Conservative allocation count without following release symlinks."""
+    total = 0
+    for parent, directories, files in os.walk(root, followlinks=False):
+        for name in [*directories, *files]:
+            info = (Path(parent) / name).lstat()
+            total += max(info.st_blocks * 512, info.st_size)
+    return total
+
+
+def check_space(project: Project, releases: Path, additional: int) -> None:
+    if project.max_release_bytes and release_bytes(releases) + additional > project.max_release_bytes:
+        raise ReleaseError("release storage budget exceeded before writing")
+    if project.min_free_bytes and shutil.disk_usage(releases).free < additional + project.min_free_bytes:
+        raise ReleaseError("insufficient free space before writing; existing release retained")
+
+
+def prepare(project: Project, root: Path, release_id: str, phase: str, activator: Activator) -> None:
+    if not project.prepare_services:
+        return
+    request = root / ".deploy-request.json"
+    temporary = root / ".deploy-request.new"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+    try:
+        with os.fdopen(fd, "w") as output:
+            json.dump({"release_id": release_id, "phase": phase}, output)
+        os.replace(temporary, request)
+        if activator("prepare", project.name) != 0:
+            raise ReleaseError(f"storage preparation failed ({phase}); no activation requested")
+    finally:
+        temporary.unlink(missing_ok=True)
+        request.unlink(missing_ok=True)
+
+
 def _remove_tree(path: Path) -> None:
     if path.is_symlink() or not path.is_dir():
         raise ReleaseError(f"refusing to remove non-directory release path: {path}")
@@ -306,23 +340,55 @@ def deploy_release(
     staging: Path | None = None
     final = releases / release_id
     switched = False
+    created_final = False
     old_id: str | None = None
     try:
+        if (project_root / '.deployment-needs-recovery').exists():
+            raise ReleaseError('previous rollback failed; verify service recovery before clearing .deployment-needs-recovery')
         if final.exists() or final.is_symlink():
             raise ReleaseError(f"release already exists: {release_id}")
         old_id = _read_current(project_root, releases)
+        # A previous killed receiver may leave only these owned temporary files.
+        for leftover in releases.iterdir():
+            if leftover.name.startswith('.incoming-') and leftover.name.endswith('.tar.gz') and leftover.is_file() and not leftover.is_symlink():
+                leftover.unlink()
+            elif leftover.name.startswith('.staging-') and leftover.is_dir() and not leftover.is_symlink():
+                _remove_tree(leftover)
+            elif leftover.is_dir() and not leftover.is_symlink() and leftover.name != old_id:
+                pending_marker = leftover / '.vps-deploy-pending.json'
+                if pending_marker.is_file() and not pending_marker.is_symlink() and not (leftover / SUCCESS_MARKER).exists():
+                    if pending_marker.stat().st_size > 1024:
+                        raise ReleaseError('Oversized pending release marker')
+                    try:
+                        pending_info = json.loads(pending_marker.read_text())
+                    except ValueError as exc:
+                        raise ReleaseError('Invalid pending release marker') from exc
+                    if not isinstance(pending_info, dict):
+                        raise ReleaseError('Invalid pending release marker')
+                    if pending_info.get('release_id') == leftover.name:
+                        _remove_tree(leftover)
+        (project_root / '.deploy-request.new').unlink(missing_ok=True)
+        prepare(project, project_root, release_id, "receive", activator)
+        check_space(project, releases, project.max_archive_bytes)
         fd, archive_name = tempfile.mkstemp(prefix=".incoming-", suffix=".tar.gz", dir=releases)
         archive = Path(archive_name)
         with os.fdopen(fd, "wb") as output:
             sha256 = _write_archive(stream, output, project.max_archive_bytes)
+        check_space(project, releases, project.max_extracted_bytes)
         staging = Path(tempfile.mkdtemp(prefix=f".staging-{release_id}-", dir=releases))
         extract_archive(archive, staging, project)
+        # The verified extracted release is sufficient; don't retain another
+        # compressed copy during image loading and activation.
+        archive.unlink()
+        archive = None
         pending = staging / ".vps-deploy-pending.json"
         pending.write_text(json.dumps({"release_id": release_id, "sha256": sha256}) + "\n", encoding="utf-8")
         os.chmod(pending, 0o440)
         os.chmod(staging, 0o750)
         os.replace(staging, final)
+        created_final = True
         staging = None
+        prepare(project, project_root, release_id, "activate", activator)
         with _deployment_signals():
             _swap_current(project_root, release_id)
             switched = True
@@ -334,7 +400,7 @@ def deploy_release(
             os.utime(final, None)
         try:
             _cleanup_releases(releases, release_id, project.keep_releases)
-        except OSError as cleanup_exc:
+        except (OSError, ReleaseError) as cleanup_exc:
             print(f"release-deploy: warning: retention cleanup failed: {cleanup_exc}", file=sys.stderr)
         print(f"deployment healthy: {project.name} {release_id} sha256={sha256}")
         return 0
@@ -347,13 +413,16 @@ def deploy_release(
                     _swap_current(project_root, old_id)
                 except OSError as rollback_exc:
                     print(f"rollback symlink failed: {rollback_exc}", file=sys.stderr)
+                    (project_root / '.deployment-needs-recovery').touch()
                     return 12
                 if activator("restart", project.name) != 0:
                     print("rollback restart also failed; releases were retained", file=sys.stderr)
+                    (project_root / '.deployment-needs-recovery').touch()
                     return 12
             else:
                 if activator("stop", project.name) != 0:
                     print("initial-deployment recovery stop failed; release was retained", file=sys.stderr)
+                    (project_root / '.deployment-needs-recovery').touch()
                     return 12
                 current = project_root / "current"
                 if current.is_symlink() and os.readlink(current) == f"releases/{release_id}":
@@ -364,6 +433,8 @@ def deploy_release(
             except (OSError, ReleaseError) as cleanup_exc:
                 print(f"warning: failed release was retained: {cleanup_exc}", file=sys.stderr)
             return 10
+        if created_final and final.is_dir() and not final.is_symlink():
+            _remove_tree(final)
         return 2
     finally:
         if staging is not None and staging.is_dir():
@@ -373,6 +444,11 @@ def deploy_release(
                 pass
         if archive is not None:
             archive.unlink(missing_ok=True)
+        if project.prepare_services:
+            try:
+                prepare(project, project_root, release_id, "cleanup", activator)
+            except (OSError, ReleaseError) as cleanup_exc:
+                print(f"release-deploy: cleanup pending: {cleanup_exc}", file=sys.stderr)
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
 
@@ -391,7 +467,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         project = load_config().project(args.project)
-        return deploy_release(project, args.release_id, sys.stdin.buffer)
+        with _deployment_signals():
+            return deploy_release(project, args.release_id, sys.stdin.buffer)
     except (ConfigError, ReleaseError) as exc:
         print(f"release-deploy: {exc}", file=sys.stderr)
         return 2

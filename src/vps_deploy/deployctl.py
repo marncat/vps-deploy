@@ -31,11 +31,12 @@ def run_command(args: Sequence[str]) -> int:
     return subprocess.run(list(args), check=False).returncode
 
 
-def diagnostics(project: Project, runner: ActionRunner) -> None:
-    for unit in project.services:
+def diagnostics(project: Project, runner: ActionRunner, units=None) -> None:
+    namespace = ("--namespace", project.journal_namespace) if project.journal_namespace else ()
+    for unit in (project.services if units is None else units):
         print(f"--- diagnostics: {unit} ---", file=sys.stderr)
         runner((SYSTEMCTL, "status", "--no-pager", "--full", "--", unit))
-        runner((JOURNALCTL, "--no-pager", "--lines", "80", "--unit", unit))
+        runner((JOURNALCTL, *namespace, "--no-pager", "--lines", "80", "--unit", unit))
 
 
 def all_active(project: Project, runner: ActionRunner) -> bool:
@@ -72,6 +73,14 @@ def wait_healthy(
 
 
 def execute(action: str, project: Project, runner: ActionRunner = run_command) -> int:
+    if action == "prepare":
+        # Only administrator-registered units, never a release-supplied command.
+        if not project.prepare_services:
+            return 0
+        rc = runner((SYSTEMCTL, "start", "--", *project.prepare_services))
+        if rc:
+            diagnostics(project, runner, project.prepare_services)
+        return rc
     if action == "status":
         result = 0
         for unit in project.services:
@@ -91,7 +100,7 @@ def execute(action: str, project: Project, runner: ActionRunner = run_command) -
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="deployctl")
-    result.add_argument("action", choices=("start", "stop", "restart", "status"))
+    result.add_argument("action", choices=("start", "stop", "restart", "status", "prepare"))
     result.add_argument("project")
     return result
 

@@ -30,6 +30,10 @@ class Project:
     max_archive_bytes: int = 1_073_741_824
     max_extracted_bytes: int = 4_294_967_296
     max_archive_members: int = 100_000
+    max_release_bytes: int = 0
+    min_free_bytes: int = 0
+    prepare_services: tuple[str, ...] = ()
+    journal_namespace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,7 +97,7 @@ def parse_config(data: bytes) -> Config:
     allowed = {
         "services", "artifact_deploy", "keep_releases", "health_url",
         "health_timeout_seconds", "max_archive_bytes", "max_extracted_bytes",
-        "max_archive_members",
+        "max_archive_members", "max_release_bytes", "min_free_bytes", "prepare_services", "journal_namespace",
     }
     for name, table in tables.items():
         if not PROJECT_RE.fullmatch(name) or not isinstance(table, dict):
@@ -106,12 +110,20 @@ def parse_config(data: bytes) -> Config:
             raise ConfigError(f"{name}.services must be a non-empty string array")
         if len(set(services)) != len(services):
             raise ConfigError(f"{name}.services contains duplicates")
-        for unit in services:
+        prepare_services = table.get("prepare_services", [])
+        if not isinstance(prepare_services, list) or not all(isinstance(x, str) for x in prepare_services):
+            raise ConfigError(f"{name}.prepare_services must be a string array")
+        if len(set(prepare_services)) != len(prepare_services):
+            raise ConfigError(f"{name}.prepare_services contains duplicates")
+        for unit in [*services, *prepare_services]:
             if not UNIT_RE.fullmatch(unit):
                 raise ConfigError(f"invalid service unit for {name}: {unit!r}")
             if unit in seen_units:
                 raise ConfigError(f"service unit is assigned more than once: {unit}")
             seen_units.add(unit)
+        namespace = table.get("journal_namespace")
+        if namespace is not None and (not isinstance(namespace, str) or not PROJECT_RE.fullmatch(namespace)):
+            raise ConfigError("invalid journal_namespace")
         artifact_deploy = table.get("artifact_deploy", False)
         if not isinstance(artifact_deploy, bool):
             raise ConfigError(f"{name}.artifact_deploy must be boolean")
@@ -125,6 +137,10 @@ def parse_config(data: bytes) -> Config:
             max_archive_bytes=_integer(table, "max_archive_bytes", 1_073_741_824, 1, 1 << 40),
             max_extracted_bytes=_integer(table, "max_extracted_bytes", 4_294_967_296, 1, 1 << 42),
             max_archive_members=_integer(table, "max_archive_members", 100_000, 1, 1_000_000),
+            max_release_bytes=_integer(table, "max_release_bytes", 0, 0, 1 << 40),
+            min_free_bytes=_integer(table, "min_free_bytes", 0, 0, 1 << 40),
+            prepare_services=tuple(prepare_services),
+            journal_namespace=namespace,
         )
     return Config(projects)
 
