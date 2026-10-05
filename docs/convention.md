@@ -89,6 +89,17 @@ explicitly allow the caller repositories.
 
 ## Health, rollback, and retention
 
+The Actions deployment job allows 60 minutes for transfer, storage checks,
+activation, and recovery. Its SSH client sends keepalive requests every 30 seconds
+and tolerates 10 unanswered requests. Successful deployment requires both a zero
+SSH exit code and the server's completion response matching the requested release
+ID and uploaded archive SHA-256. The result is recorded in the job summary.
+
+A connection failure does not prove that server-side work stopped. Activation or
+recovery may still be running; inspect service and release state before retrying.
+The workflow does not automatically retry or infer deployment success from a
+public health endpoint alone.
+
 `deployctl restart` waits for every configured unit to become active. When a
 loopback `health_url` is configured, it retries HTTP GET until it receives a 2xx
 response or the configured deadline expires. Without a URL it waits two seconds

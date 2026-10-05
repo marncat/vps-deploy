@@ -34,7 +34,7 @@ jobs:
   deploy:
     name: Deploy ${{ inputs.project }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     environment: production
     env:
       DEPLOY_PROJECT: ${{ inputs.project }}
@@ -82,9 +82,11 @@ jobs:
             exit 1
           fi
           gzip -t -- "${files[0]}"
-          sha256sum -- "${files[0]}"
+          archive_sha256="$(sha256sum -- "${files[0]}")"
+          archive_sha256="${archive_sha256%% *}"
           {
             echo "path=${files[0]}"
+            echo "sha256=$archive_sha256"
             echo "release_id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:12}"
           } >> "$GITHUB_OUTPUT"
 
@@ -115,16 +117,48 @@ jobs:
         shell: bash
         env:
           ARCHIVE_PATH: ${{ steps.artifact.outputs.path }}
+          ARCHIVE_SHA256: ${{ steps.artifact.outputs.sha256 }}
           RELEASE_ID: ${{ steps.artifact.outputs.release_id }}
         run: |
           set -Eeuo pipefail
-          ssh \
+          deployment_log="$RUNNER_TEMP/deployment.log"
+          if ssh \
             -i "$RUNNER_TEMP/deploy-ssh/id_ed25519" \
             -o BatchMode=yes \
             -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$RUNNER_TEMP/deploy-ssh/known_hosts" \
             -p "$VPS_PORT" \
             "deploy@$VPS_HOST" \
-            "deploy $DEPLOY_PROJECT $RELEASE_ID" < "$ARCHIVE_PATH"
+            "deploy $DEPLOY_PROJECT $RELEASE_ID" < "$ARCHIVE_PATH" | tee "$deployment_log"; then
+            :
+          else
+            result=$?
+            echo "::error::Deployment was not confirmed (exit $result). Server-side activation or recovery may still be running. Verify service and release before retrying."
+            {
+              echo "### Deployment not confirmed"
+              echo "Project: $DEPLOY_PROJECT; requested release: $RELEASE_ID; exit: $result."
+              echo "Server-side activation or recovery may still be running. Verify service and release before retrying; this workflow does not retry automatically."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$result"
+          fi
+          expected="deployment healthy: $DEPLOY_PROJECT $RELEASE_ID sha256=$ARCHIVE_SHA256"
+          if ! grep -Fxq -- "$expected" "$deployment_log"; then
+            echo "::error::SSH exited successfully but the expected release and archive digest were not confirmed. Verify service and release before retrying."
+            {
+              echo "### Deployment not confirmed"
+              echo "SSH exited successfully, but the completion response did not confirm release $RELEASE_ID and archive SHA-256 $ARCHIVE_SHA256."
+              echo "Verify service and release before retrying."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo "### Deployment confirmed"
+            echo "Project: $DEPLOY_PROJECT"
+            echo "Release: $RELEASE_ID"
+            echo "Archive SHA-256: $ARCHIVE_SHA256"
+            echo "Server activation and configured health checks completed successfully."
+          } >> "$GITHUB_STEP_SUMMARY"
