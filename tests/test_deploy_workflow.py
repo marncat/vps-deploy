@@ -1,4 +1,3 @@
-import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -10,85 +9,57 @@ import unittest
 WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/deploy.yml'
 
 
-def step_script(name):
-    """Execute the actual inline Bash, without a YAML dependency in the toolkit."""
-    step = WORKFLOW.read_text().split(f'      - name: {name}\n', 1)[1]
-    step = step.split('\n      - name:', 1)[0]
-    return textwrap.dedent(step.split('        run: |\n', 1)[1])
+class CompatibilityWorkflowTests(unittest.TestCase):
+    def test_transport_is_delegated_to_pinned_root_action(self):
+        workflow = WORKFLOW.read_text()
+        self.assertRegex(workflow, r'uses: marncat/vps-deploy@[0-9a-f]{40}\n')
+        self.assertNotIn('ssh-keygen', workflow)
+        self.assertNotIn('        run: ssh', workflow)
+        self.assertNotIn('    env:', workflow)
+        self.assertIn('timeout-minutes: 60', workflow)
+        self.assertIn('environment: production', workflow)
+        self.assertIn('cancel-in-progress: false', workflow)
+        self.assertIn('group: vps-deploy-${{ inputs.project }}', workflow)
+        for name in ('vps_host', 'vps_port', 'vps_ssh_key', 'vps_known_hosts'):
+            self.assertIn(f'{name}: ${{{{ secrets.{name} }}}}', workflow)
 
-
-class DeployWorkflowTests(unittest.TestCase):
-    def run_deployment(self, mode):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            archive = root / 'release.tar.gz'
-            archive.write_bytes(b'validated archive fixture')
-            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            summary = root / 'summary.md'
-            ssh = root / 'ssh'
-            ssh.write_text('''#!/usr/bin/env python3
-import hashlib
-import os
-import sys
-args = sys.argv[1:]
-assert 'ServerAliveInterval=30' in args
-assert 'ServerAliveCountMax=10' in args
-assert 'StrictHostKeyChecking=yes' in args
-assert args[-1] == 'deploy listen-again run-1-abc'
-digest = hashlib.sha256(sys.stdin.buffer.read()).hexdigest()
-assert digest == os.environ['ARCHIVE_SHA256']
-mode = os.environ['MOCK_MODE']
-if mode == 'disconnected':
-    print('client_loop: send disconnect: Broken pipe', file=sys.stderr)
-    sys.exit(255)
-if mode == 'missing':
-    print('Still preparing the service')
-    sys.exit(0)
-release = 'another-release' if mode == 'wrong-release' else 'run-1-abc'
-if mode == 'wrong-digest':
-    digest = '0' * 64
-print(f'deployment healthy: listen-again {release} sha256={digest}')
-sys.exit(255 if mode == 'success-then-disconnected' else 0)
-''')
-            ssh.chmod(0o700)
-            env = {
-                **os.environ,
-                'PATH': f'{root}:' + os.environ['PATH'],
-                'RUNNER_TEMP': str(root),
-                'ARCHIVE_PATH': str(archive),
-                'ARCHIVE_SHA256': digest,
-                'GITHUB_STEP_SUMMARY': str(summary),
-                'DEPLOY_PROJECT': 'listen-again',
-                'RELEASE_ID': 'run-1-abc',
-                'VPS_HOST': 'unused.invalid',
-                'VPS_PORT': '22',
-                'MOCK_MODE': mode,
-            }
-            result = subprocess.run(
-                ['bash', '-c', step_script('Stream and activate release')],
-                env=env, capture_output=True, text=True, timeout=10,
-            )
-            return result, summary.read_text() if summary.exists() else ''
-
-    def test_confirmed_release(self):
-        result, summary = self.run_deployment('success')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('### Deployment confirmed', summary)
-        self.assertIn('run-1-abc', summary)
-
-    def test_completion_response_must_match_release_and_archive(self):
-        for mode in ('missing', 'wrong-release', 'wrong-digest'):
-            with self.subTest(mode=mode):
-                result, summary = self.run_deployment(mode)
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('Deployment not confirmed', summary)
-
-    def test_disconnect_is_not_success_even_after_completion_response(self):
-        for mode in ('disconnected', 'success-then-disconnected'):
-            with self.subTest(mode=mode):
-                result, summary = self.run_deployment(mode)
-                self.assertEqual(result.returncode, 255, result.stderr)
-                self.assertIn('may still be running', summary)
+    def test_download_requires_exactly_one_regular_release_archive(self):
+        # Only artifact discovery remains inline; transport tests execute the
+        # canonical scripts in test_direct_action.py.
+        workflow = WORKFLOW.read_text()
+        step = workflow.split('      - name: Locate release archive\n', 1)[1]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('\n      - name:', 1)[0])
+        for mode in ('valid', 'nested-with-spaces', 'empty', 'extra', 'wrong-name', 'symlink'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix='download fixture ') as directory:
+                root = Path(directory)
+                artifact = root / 'deploy-artifact'
+                artifact.mkdir()
+                archive = artifact / 'release.tar.gz'
+                if mode == 'nested-with-spaces':
+                    archive = artifact / 'nested path' / 'release.tar.gz'
+                    archive.parent.mkdir()
+                if mode == 'wrong-name':
+                    archive = artifact / 'other.tar.gz'
+                if mode == 'symlink':
+                    target = root / 'target'
+                    target.write_bytes(b'archive')
+                    archive.symlink_to(target)
+                elif mode != 'empty':
+                    archive.write_bytes(b'archive')
+                if mode == 'extra':
+                    (artifact / 'extra').write_bytes(b'extra')
+                output = root / 'outputs'
+                result = subprocess.run(
+                    ['bash', '-c', script],
+                    env={**os.environ, 'RUNNER_TEMP': str(root), 'GITHUB_OUTPUT': str(output)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                if mode in ('valid', 'nested-with-spaces'):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text(), f'path={archive}\n')
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(output.exists())
 
 
 if __name__ == '__main__':

@@ -25,7 +25,10 @@ the same runner job:
 The outputs are `release_id` and `archive_sha256`. The caller owns production
 environment protection, deployment concurrency, permissions, and the job timeout.
 See [caller workflow examples](docs/convention.md#caller-workflow). The reusable
-workflow continues to accept an Actions artifact for existing callers.
+workflow continues to accept an Actions artifact for existing callers. It
+downloads and locates the archive, then calls the same direct action pinned to
+its audited implementation commit; transport validation and acknowledgements
+have one implementation.
 
 An SSH disconnect or a missing exact completion response leaves deployment
 unconfirmed, even if the public health endpoint responds. Server activation or
@@ -77,7 +80,7 @@ only through `sudo -n /usr/local/sbin/deployctl`.
 ```sh
 PYTHONPATH=src python3 -m unittest discover -v
 python3 -m compileall -q src tests
-bash -n install/install.sh scripts/*.sh
+for script in install/install.sh scripts/*.sh; do bash -n "$script"; done
 ```
 
 See [the project migration template](docs/migration-template.md) when adopting

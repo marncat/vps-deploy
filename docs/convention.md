@@ -95,7 +95,10 @@ and non-cancelling concurrency for its project. Concurrency groups are scoped to
 the caller repository; the server deployment lock also serializes each project.
 
 Existing callers can retain the common reusable workflow as a separate job in
-the same workflow run:
+the same workflow run. This compatibility wrapper downloads the artifact,
+requires exactly one regular `release.tar.gz`, and calls the root action pinned
+to an audited commit. Its API, production environment, permissions, concurrency,
+and 60-minute timeout remain the same:
 
 ```yaml
 jobs:

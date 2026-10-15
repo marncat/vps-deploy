@@ -20,7 +20,7 @@ jobs:
           python3 -m unittest discover -v
       - name: Check shell scripts
         run: |
-          bash -n install/install.sh scripts/*.sh
+          for script in install/install.sh scripts/*.sh; do bash -n "$script"; done
           shellcheck install/install.sh scripts/*.sh
       - name: Validate Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
