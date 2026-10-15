@@ -4,6 +4,34 @@ Small shared deployment infrastructure for applications hosted as systemd
 services on one VPS. Applications are built in GitHub Actions and uploaded as
 immutable tar artifacts; the VPS never clones or builds their repositories.
 
+The root composite action streams a local `release.tar.gz` directly over SSH,
+without uploading it to GitHub Actions artifact storage. Pin it to an audited
+commit and run it after the application's build, tests, and packaging steps in
+the same runner job:
+
+```yaml
+- name: Deploy release
+  id: deploy
+  uses: marncat/vps-deploy@PINNED_COMMIT_SHA
+  with:
+    project: example-app
+    archive_path: path/to/release.tar.gz
+    vps_host: ${{ secrets.VPS_HOST }}
+    vps_port: ${{ secrets.VPS_PORT }}
+    vps_ssh_key: ${{ secrets.VPS_SSH_KEY }}
+    vps_known_hosts: ${{ secrets.VPS_KNOWN_HOSTS }}
+```
+
+The outputs are `release_id` and `archive_sha256`. The caller owns production
+environment protection, deployment concurrency, permissions, and the job timeout.
+See [caller workflow examples](docs/convention.md#caller-workflow). The reusable
+workflow continues to accept an Actions artifact for existing callers.
+
+An SSH disconnect or a missing exact completion response leaves deployment
+unconfirmed, even if the public health endpoint responds. Server activation or
+recovery may still be running: verify the service, current release, and success
+marker digest before retrying. Neither entry point retries automatically.
+
 The trust boundaries are intentionally separate:
 
 - `deployctl` runs through sudo and only controls root-configured systemd units.
@@ -49,7 +77,7 @@ only through `sudo -n /usr/local/sbin/deployctl`.
 ```sh
 PYTHONPATH=src python3 -m unittest discover -v
 python3 -m compileall -q src tests
-bash -n install/install.sh
+bash -n install/install.sh scripts/*.sh
 ```
 
 See [the project migration template](docs/migration-template.md) when adopting

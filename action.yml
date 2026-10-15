@@ -1,0 +1,50 @@
+name: Deploy archive to VPS
+description: Stream a local release.tar.gz to the restricted VPS deployment gateway
+inputs:
+  project:
+    description: Server-side deployctl project name
+    required: true
+  archive_path:
+    description: Path to a nonempty regular release.tar.gz
+    required: true
+  vps_host:
+    description: VPS hostname or IP
+    required: true
+  vps_port:
+    description: SSH port
+    required: true
+  vps_ssh_key:
+    description: Restricted deployment private key
+    required: true
+  vps_known_hosts:
+    description: Pinned OpenSSH known_hosts entries
+    required: true
+outputs:
+  release_id:
+    description: Requested immutable release ID
+    value: ${{ steps.archive.outputs.release_id }}
+  archive_sha256:
+    description: SHA-256 of the uploaded archive
+    value: ${{ steps.archive.outputs.archive_sha256 }}
+runs:
+  using: composite
+  steps:
+    - name: Validate release archive
+      id: archive
+      shell: bash
+      env:
+        DEPLOY_PROJECT: ${{ inputs.project }}
+        ARCHIVE_PATH: ${{ inputs.archive_path }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/prepare.sh"
+    - name: Stream and activate release
+      shell: bash
+      env:
+        DEPLOY_PROJECT: ${{ inputs.project }}
+        ARCHIVE_PATH: ${{ inputs.archive_path }}
+        ARCHIVE_SHA256: ${{ steps.archive.outputs.archive_sha256 }}
+        RELEASE_ID: ${{ steps.archive.outputs.release_id }}
+        VPS_HOST: ${{ inputs.vps_host }}
+        VPS_PORT: ${{ inputs.vps_port }}
+        VPS_SSH_KEY: ${{ inputs.vps_ssh_key }}
+        VPS_KNOWN_HOSTS: ${{ inputs.vps_known_hosts }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/deploy.sh"

@@ -34,8 +34,7 @@ The application build job must create `release.tar.gz` whose archive root is
 the application's complete systemd `WorkingDirectory`. It must not contain a
 repository, build cache, persistent data, or server secrets.
 
-Package it before using `actions/upload-artifact`; the inner tar preserves Unix
-executable bits:
+Package it before deployment; the inner tar preserves Unix executable bits:
 
 ```sh
 staging=$(mktemp -d)
@@ -44,13 +43,59 @@ cp -a path/to/runtime-assets "$staging/assets"
 tar -C "$staging" -czf release.tar.gz .
 ```
 
-Upload an Actions artifact named `deployable` containing exactly that file.
-The common workflow rejects additional files.
+The direct action requires a nonempty regular file named `release.tar.gz`, rejects
+symlinks, checks gzip integrity, and computes its SHA-256. Paths containing spaces
+are supported. For the reusable workflow, upload an Actions artifact named
+`deployable` containing exactly that file; the wrapper rejects additional files.
 
 ## Caller workflow
 
-Build and validate the application in its own repository, then call the common
-workflow as a separate job in the same workflow run:
+For direct upload, build and validate in the application repository, package the
+result, then call the root action in a later step of the same job. Keep build
+verification and deployment as separate steps so a failed build cannot deploy.
+Local filesystem paths do not transfer across GitHub-hosted jobs.
+
+```yaml
+concurrency:
+  group: production-PROJECT
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: production
+    steps:
+      # Project-specific checkout, tests, build, and release.tar.gz packaging...
+      - name: Deploy release
+        id: deploy
+        uses: marncat/vps-deploy@PINNED_COMMIT_SHA
+        with:
+          project: PROJECT
+          archive_path: release.tar.gz
+          vps_host: ${{ secrets.VPS_HOST }}
+          vps_port: ${{ secrets.VPS_PORT }}
+          vps_ssh_key: ${{ secrets.VPS_SSH_KEY }}
+          vps_known_hosts: ${{ secrets.VPS_KNOWN_HOSTS }}
+```
+
+All six inputs are required. `release_id` is generated from the GitHub run ID,
+attempt, and first twelve commit SHA characters; `archive_sha256` reports the
+validated archive digest. Outputs identify the request; success also requires the
+action step to finish successfully. SSH credentials enter only the transport
+step. The action uses a unique private temporary directory and removes its key,
+host file, and response log on exit, including ordinary failure and handled
+termination. A forced runner shutdown cannot run shell cleanup.
+
+The caller must configure production approval rules, a 60-minute job timeout,
+and non-cancelling concurrency for its project. Concurrency groups are scoped to
+the caller repository; the server deployment lock also serializes each project.
+
+Existing callers can retain the common reusable workflow as a separate job in
+the same workflow run:
 
 ```yaml
 jobs:
@@ -80,7 +125,7 @@ jobs:
       vps_known_hosts: ${{ secrets.VPS_KNOWN_HOSTS }}
 ```
 
-Pin the reusable workflow to an audited commit SHA. Give organization secrets
+Pin either entry point to an audited commit SHA. Give organization secrets
 access only to repositories that are trusted to deploy all projects with
 `artifact_deploy = true`. The common key deliberately creates one shared trust
 domain; the forced command still prevents arbitrary shell access.
@@ -89,7 +134,7 @@ explicitly allow the caller repositories.
 
 ## Health, rollback, and retention
 
-The Actions deployment job allows 60 minutes for transfer, storage checks,
+The reusable workflow allows 60 minutes for transfer, storage checks,
 activation, and recovery. Its SSH client sends keepalive requests every 30 seconds
 and tolerates 10 unanswered requests. Successful deployment requires both a zero
 SSH exit code and the server's completion response matching the requested release
@@ -97,7 +142,7 @@ ID and uploaded archive SHA-256. The result is recorded in the job summary.
 
 A connection failure does not prove that server-side work stopped. Activation or
 recovery may still be running; inspect service and release state before retrying.
-The workflow does not automatically retry or infer deployment success from a
+Neither entry point automatically retries or infers deployment success from a
 public health endpoint alone.
 
 `deployctl restart` waits for every configured unit to become active. When a
